@@ -1,0 +1,18 @@
+{
+  "database": "ai-memory-hub-v2",
+  "module-path": "./spacetime",
+  "server": "local",
+  "env": {
+    "OIDC_ISSUER": "http://127.0.0.1:3001",
+    "OIDC_AUDIENCE": "ai-memory-hub"
+  },
+  "dev": {
+    "run": "npm run dev"
+  },
+  "generate": [
+    {
+      "language": "typescript",
+      "out-dir": "./src/lib/spacetimedb/generated"
+    }
+  ]
+}

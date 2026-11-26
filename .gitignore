@@ -1,0 +1,11 @@
+node_modules
+.next
+.env
+.env.local
+.auth-key.json
+*.log
+*.tsbuildinfo
+spacetime/src/*.wasm
+spacetime/dist
+src/lib/spacetimedb/generated/*
+!src/lib/spacetimedb/generated/.gitkeep
