@@ -7,5 +7,3 @@ node_modules
 *.tsbuildinfo
 spacetime/src/*.wasm
 spacetime/dist
-src/lib/spacetimedb/generated/*
-!src/lib/spacetimedb/generated/.gitkeep
