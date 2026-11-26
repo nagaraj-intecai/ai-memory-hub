@@ -3,7 +3,7 @@
   "module-path": "./spacetime",
   "server": "local",
   "env": {
-    "OIDC_ISSUER": "http://127.0.0.1:3001",
+    "OIDC_ISSUER": "https://ai-memory-hub.onrender.com",
     "OIDC_AUDIENCE": "ai-memory-hub"
   },
   "dev": {
