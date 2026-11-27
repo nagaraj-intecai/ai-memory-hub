@@ -44,6 +44,60 @@ function responseContent(response: unknown): string {
   return typeof content === 'string' ? content : '';
 }
 
+function normalizeCategory(value: unknown): (typeof MEMORY_CATEGORIES)[number] {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if ((MEMORY_CATEGORIES as readonly string[]).includes(raw)) {
+    return raw as (typeof MEMORY_CATEGORIES)[number];
+  }
+  if (raw.includes('personal') || raw.includes('bio') || raw.includes('identity')) return 'personal information';
+  if (raw.includes('prefer')) return 'preferences';
+  if (raw.includes('project') || raw.includes('work')) return 'projects';
+  if (raw.includes('task') || raw.includes('todo')) return 'tasks';
+  return 'knowledge';
+}
+
+function normalizeCandidate(raw: unknown): unknown {
+  if (typeof raw !== 'object' || raw === null) return raw;
+  const record = raw as Record<string, unknown>;
+  const rawImportance = Number(record.importance ?? 75);
+  const scaled = rawImportance > 0 && rawImportance <= 1 ? rawImportance * 100 : rawImportance;
+  const importance = Number.isFinite(scaled) ? Math.min(100, Math.max(0, Math.round(scaled))) : 75;
+  const title = typeof record.title === 'string' ? record.title.trim().slice(0, 300) : '';
+  const summary = typeof record.summary === 'string' ? record.summary.trim().slice(0, 2000) : '';
+  const content = typeof record.content === 'string' ? record.content.trim().slice(0, 50000) : '';
+
+  return {
+    shouldSave: Boolean(record.shouldSave),
+    title: title || summary.slice(0, 80) || content.slice(0, 80),
+    summary: summary || content.slice(0, 200) || title,
+    content: content || summary || title,
+    category: normalizeCategory(record.category),
+    importance,
+  };
+}
+
+function fallbackCandidate(userMessage: string): z.infer<typeof candidateSchema> | undefined {
+  const trimmed = userMessage.trim();
+  if (!trimmed || !shouldAttemptExtraction(trimmed, '')) return undefined;
+  const lower = trimmed.toLowerCase();
+  const category: (typeof MEMORY_CATEGORIES)[number] = lower.includes('project')
+    ? 'projects'
+    : lower.includes('task') || lower.includes('todo')
+      ? 'tasks'
+      : /(prefer|like|dislike|love|hate)/.test(lower)
+        ? 'preferences'
+        : 'personal information';
+  const summary = trimmed.slice(0, 200);
+  return {
+    shouldSave: true,
+    title: trimmed.slice(0, 60),
+    summary,
+    content: trimmed.slice(0, 50000),
+    category,
+    importance: 80,
+  };
+}
+
 function dedupeKey(title: string, summary: string): string {
   return createHash('sha256').update(`${title.toLowerCase()}\n${summary.toLowerCase()}`).digest('hex');
 }
@@ -59,6 +113,8 @@ export async function maybeExtractMemory(
   if (!enabled || !env.AUTO_EXTRACT_MEMORIES || !shouldAttemptExtraction(userMessage, assistantMessage)) {
     return { usage };
   }
+
+  let candidate: z.infer<typeof candidateSchema> | undefined;
 
   try {
     const response = await createChatCompletion({
@@ -82,31 +138,39 @@ export async function maybeExtractMemory(
     });
 
     mergeUsage(usage, response);
-    const parsed = candidateSchema.safeParse(parseJsonCandidate(responseContent(response)));
-    if (!parsed.success || !parsed.data.shouldSave) {
-      return { usage: finalizeUsage(usage) };
+    const parsed = candidateSchema.safeParse(normalizeCandidate(parseJsonCandidate(responseContent(response))));
+    if (parsed.success) {
+      if (!parsed.data.shouldSave) return { usage: finalizeUsage(usage) };
+      candidate = parsed.data;
+    } else {
+      logger.warn('memory.extraction.invalid_candidate', { issues: parsed.error.issues.length });
+      candidate = fallbackCandidate(userMessage);
     }
-
-    const key = dedupeKey(parsed.data.title, parsed.data.summary);
-    const existing = await repository.listMemories(token);
-    if (existing.some((memory) => memory.dedupeKey === key)) {
-      return { usage: finalizeUsage(usage) };
-    }
-
-    return {
-      memory: {
-        title: parsed.data.title,
-        content: parsed.data.content,
-        summary: parsed.data.summary,
-        category: parsed.data.category,
-        importance: parsed.data.importance,
-        dedupeKey: key,
-        sourceType: 'chat-extraction',
-      },
-      usage: finalizeUsage(usage),
-    };
   } catch (error) {
-    logger.warn('memory.extraction.skipped', { reason: error instanceof Error ? error.message : 'unknown' });
+    logger.warn('memory.extraction.fallback', { reason: error instanceof Error ? error.message : 'unknown' });
+    candidate = fallbackCandidate(userMessage);
+  }
+
+  if (!candidate || !candidate.shouldSave) {
     return { usage: finalizeUsage(usage) };
   }
+
+  const key = dedupeKey(candidate.title, candidate.summary);
+  const existing = await repository.listMemories(token);
+  if (existing.some((memory) => memory.dedupeKey === key)) {
+    return { usage: finalizeUsage(usage) };
+  }
+
+  return {
+    memory: {
+      title: candidate.title,
+      content: candidate.content,
+      summary: candidate.summary,
+      category: candidate.category,
+      importance: candidate.importance,
+      dedupeKey: key,
+      sourceType: 'chat-extraction',
+    },
+    usage: finalizeUsage(usage),
+  };
 }
