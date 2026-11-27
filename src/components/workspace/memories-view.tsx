@@ -43,6 +43,12 @@ export function MemoriesView({ memories, relations, onRefresh }: MemoriesViewPro
   const [strength, setStrength] = useState(0.8);
 
   const [filtered, setFiltered] = useState(memories);
+  const [debouncedQuery, setDebouncedQuery] = useState(query);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQuery(query), 200);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,7 +56,7 @@ export function MemoriesView({ memories, relations, onRefresh }: MemoriesViewPro
       .list({
         category: categoryFilter || undefined,
         status: statusFilter || undefined,
-        q: query.trim() || undefined,
+        q: debouncedQuery.trim() || undefined,
         limit: 200,
       })
       .then((result) => {
@@ -62,7 +68,7 @@ export function MemoriesView({ memories, relations, onRefresh }: MemoriesViewPro
     return () => {
       cancelled = true;
     };
-  }, [memories, categoryFilter, statusFilter, query]);
+  }, [memories, categoryFilter, statusFilter, debouncedQuery]);
 
   function resetForm() {
     setEditingId(null);

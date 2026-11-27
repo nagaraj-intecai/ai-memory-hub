@@ -73,8 +73,9 @@ async function detectAndLinkRelations(token: string, created: MemoryDto, existin
 export async function createMemory(
   token: string,
   input: Parameters<typeof repository.createMemory>[1],
+  knownMemories?: MemoryDto[],
 ): Promise<MemoryDto> {
-  const existing = await repository.listMemories(token);
+  const existing = knownMemories ?? (await repository.listMemories(token));
   const memory = await repository.createMemory(token, input);
   if (!memory) throw notFound('Memory could not be created');
   await detectAndLinkRelations(token, memory, existing);

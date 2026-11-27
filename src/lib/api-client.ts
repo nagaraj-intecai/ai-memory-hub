@@ -24,24 +24,45 @@ export type AuthPayload = {
   settings?: UserSettingsDto;
 };
 
+const inFlightGetRequests = new Map<string, Promise<unknown>>();
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    credentials: 'include',
-    headers: {
-      ...(init?.body ? { 'content-type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-  });
-
-  const payload = (await response.json().catch(() => ({}))) as T & {
-    error?: { message?: string };
-  };
-
-  if (!response.ok) {
-    throw new Error(payload.error?.message || `Request failed (${response.status})`);
+  const method = init?.method ?? 'GET';
+  if (method === 'GET') {
+    const pending = inFlightGetRequests.get(url);
+    if (pending) return pending as Promise<T>;
   }
-  return payload;
+
+  const request = (async () => {
+    const response = await fetch(url, {
+      ...init,
+      credentials: 'include',
+      headers: {
+        ...(init?.body ? { 'content-type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+    });
+
+    const payload = (await response.json().catch(() => ({}))) as T & {
+      error?: { message?: string };
+    };
+
+    if (!response.ok) {
+      throw new Error(payload.error?.message || `Request failed (${response.status})`);
+    }
+    return payload;
+  })();
+
+  if (method === 'GET') {
+    inFlightGetRequests.set(url, request);
+    void request
+      .finally(() => {
+        if (inFlightGetRequests.get(url) === request) inFlightGetRequests.delete(url);
+      })
+      .catch(() => undefined);
+  }
+
+  return request;
 }
 
 export const apiClient = {

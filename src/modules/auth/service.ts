@@ -7,6 +7,19 @@ import { repository } from '@/lib/spacetimedb/repository';
 import { ApiError, conflict, unauthorized } from '@/middleware/errors';
 import type { AuthUserDto, UserSettingsDto } from '@/types/domain';
 
+const PROFILE_ENSURE_TTL_MS = 10_000;
+const profileEnsureUntil = new Map<string, number>();
+
+function canSkipProfileEnsure(token: string): boolean {
+  const now = Date.now();
+  const until = profileEnsureUntil.get(token);
+  if (until !== undefined && until > now) return true;
+  for (const [key, value] of profileEnsureUntil) {
+    if (value <= now) profileEnsureUntil.delete(key);
+  }
+  return false;
+}
+
 export async function emailHash(email: string | undefined): Promise<string | undefined> {
   if (!email) return undefined;
   return createHash('sha256').update(email.toLowerCase()).digest('hex');
@@ -80,12 +93,20 @@ export async function loginWithPassword(input: {
   return { token, user, settings };
 }
 
-export async function ensureProfile(token: string, claims: AuthClaims): Promise<void> {
-  await repository.ensureUser(token, claims, await emailHash(claims.email));
+export async function ensureProfile(token: string, claims: AuthClaims): Promise<AuthUserDto | undefined> {
+  if (canSkipProfileEnsure(token)) return undefined;
+  const user = await repository.ensureUser(token, claims, await emailHash(claims.email));
+  if (user) profileEnsureUntil.set(token, Date.now() + PROFILE_ENSURE_TTL_MS);
+  return user;
 }
 
-export async function getCurrentUser(token: string): Promise<{ user?: AuthUserDto; settings?: UserSettingsDto }> {
-  const user = await repository.getProfile(token);
-  const settings = await repository.getSettings(token);
+export async function getCurrentUser(
+  token: string,
+  knownProfile?: AuthUserDto,
+): Promise<{ user?: AuthUserDto; settings?: UserSettingsDto }> {
+  const [user, settings] = await Promise.all([
+    knownProfile ? Promise.resolve(knownProfile) : repository.getProfile(token),
+    repository.getSettings(token),
+  ]);
   return { user, settings };
 }

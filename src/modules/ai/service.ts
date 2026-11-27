@@ -1,3 +1,4 @@
+import { after } from 'next/server';
 import { getEnv } from '@/lib/env';
 import { logger } from '@/lib/logger';
 import {
@@ -11,14 +12,33 @@ import { repository } from '@/lib/spacetimedb/repository';
 import { createMemory } from '@/modules/memories/service';
 import { saveMessage } from '@/modules/messages/service';
 import { maybeExtractMemory } from '@/modules/memory-extraction/service';
-import { retrieveRelevantMemories } from '@/modules/memory-retrieval/service';
-import type { MessageDto, MemoryDto } from '@/types/domain';
+import { selectRelevantMemories } from '@/modules/memory-retrieval/service';
+import type { MessageDto, MemoryDto, UserSettingsDto } from '@/types/domain';
+
+function scheduleAfter(task: () => Promise<void>): void {
+  const run = async () => {
+    try {
+      await task();
+    } catch (error) {
+      logger.error('chat.background.failed', { reason: error instanceof Error ? error.message : 'unknown' });
+    }
+  };
+  try {
+    after(run);
+  } catch {
+    void run();
+  }
+}
 
 type ChatMessage = { role: string; content: string };
 
-export async function resolveChatModel(token: string, requestedModel?: string): Promise<string> {
+export async function resolveChatModel(
+  token: string,
+  requestedModel?: string,
+  knownSettings?: UserSettingsDto,
+): Promise<string> {
   const env = getEnv();
-  const settings = await repository.getSettings(token);
+  const settings = knownSettings ?? (await repository.getSettings(token));
   return requestedModel?.trim() || settings?.defaultModel?.trim() || env.OPENROUTER_MODEL;
 }
 
@@ -85,37 +105,38 @@ export async function streamChat(input: {
   conversationId: string;
   userMessage: string;
   model?: string;
+  settings?: UserSettingsDto;
 }): Promise<Response> {
   const env = getEnv();
-  const settings = await repository.getSettings(input.token);
+  const settings = input.settings ?? (await repository.getSettings(input.token));
   const model = input.model?.trim() || settings?.defaultModel?.trim() || env.OPENROUTER_MODEL;
   if (!isValidModelId(model)) throw normalizeOpenRouterError({ status: 400, message: 'Invalid model id' });
 
-  try {
-    await assertModelAvailable(model);
-  } catch (error) {
+  void assertModelAvailable(model).catch((error) => {
     logger.warn('ai.model_catalog.unavailable', { reason: error instanceof Error ? error.message : 'unknown' });
-  }
+  });
 
-  const [history, memories] = await Promise.all([
+  const [history, allMemories] = await Promise.all([
     repository.getMessages(input.token, input.conversationId),
-    retrieveRelevantMemories(input.token, input.userMessage, env.MAX_CHAT_CONTEXT_MEMORIES),
+    repository.listMemories(input.token),
   ]);
+  const memories = selectRelevantMemories(allMemories, input.userMessage, env.MAX_CHAT_CONTEXT_MEMORIES);
 
   const messages = buildMessages(history, memories, env.MAX_CHAT_CONTEXT_MESSAGES, env.MAX_CHAT_CONTEXT_MEMORIES, input.userMessage);
   const startedAt = Date.now();
-  const completion = await createChatCompletion({ model, messages, max_tokens: 2048, stream: true });
+  const [completion] = await Promise.all([
+    createChatCompletion({ model, messages, max_tokens: 2048, stream: true }),
+    saveMessage(input.token, {
+      conversationId: input.conversationId,
+      role: 'user',
+      content: input.userMessage,
+      status: 'complete',
+      finishReason: undefined,
+      promptTokens: 0,
+      completionTokens: 0,
+    }),
+  ]);
   const iterator = completion as unknown as AsyncIterable<unknown>;
-
-  await saveMessage(input.token, {
-    conversationId: input.conversationId,
-    role: 'user',
-    content: input.userMessage,
-    status: 'complete',
-    finishReason: undefined,
-    promptTokens: 0,
-    completionTokens: 0,
-  });
 
   const usage = createUsageSnapshot();
   const encoder = new TextEncoder();
@@ -146,9 +167,8 @@ export async function streamChat(input: {
 
       const finalUsage = finalizeUsage(usage);
       const latencyMs = Date.now() - startedAt;
-
-      try {
-        await saveMessage(input.token, {
+      const results = await Promise.allSettled([
+        saveMessage(input.token, {
           conversationId: input.conversationId,
           role: 'assistant',
           content: content || `[error] ${failure ?? 'unknown error'}`,
@@ -156,9 +176,8 @@ export async function streamChat(input: {
           finishReason: finalUsage.finishReason,
           promptTokens: finalUsage.promptTokens,
           completionTokens: finalUsage.completionTokens,
-        });
-
-        await repository.recordUsage(input.token, {
+        }),
+        repository.recordUsage(input.token, {
           conversationId: input.conversationId,
           model,
           operation: 'chat',
@@ -172,20 +191,37 @@ export async function streamChat(input: {
           errorCode: failure,
           latencyMs,
           generationId: finalUsage.generationId,
+        }),
+      ]);
+      const persistenceError = results.find((result) => result.status === 'rejected');
+      if (persistenceError?.status === 'rejected') {
+        logger.error('chat.persistence.failed', {
+          reason: persistenceError.reason instanceof Error ? persistenceError.reason.message : 'unknown',
         });
+        failure = 'Response could not be persisted';
+      }
 
-        if (!failure) {
+      if (failure) controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'error', message: failure })}\n`));
+      controller.close();
+
+      if (!failure) {
+        scheduleAfter(async () => {
           const extraction = await maybeExtractMemory(
             input.token,
             input.userMessage,
             content,
             settings?.autoExtractMemories ?? env.AUTO_EXTRACT_MEMORIES,
+            allMemories,
           );
           if (extraction.memory) {
-            await createMemory(input.token, {
-              ...extraction.memory,
-              conversationId: input.conversationId,
-            });
+            await createMemory(
+              input.token,
+              {
+                ...extraction.memory,
+                conversationId: input.conversationId,
+              },
+              allMemories,
+            );
           }
           await repository.recordUsage(input.token, {
             model: env.OPENROUTER_EXTRACTION_MODEL,
@@ -200,14 +236,8 @@ export async function streamChat(input: {
             latencyMs: 0,
             generationId: extraction.usage.generationId,
           });
-        }
-      } catch (error) {
-        logger.error('chat.persistence.failed', { reason: error instanceof Error ? error.message : 'unknown' });
-        failure = 'Response could not be persisted';
+        });
       }
-
-      if (failure) controller.enqueue(encoder.encode(`${JSON.stringify({ type: 'error', message: failure })}\n`));
-      controller.close();
     },
   });
 

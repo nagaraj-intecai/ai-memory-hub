@@ -4,6 +4,7 @@ import { chatSchema } from '@/lib/validation/schemas';
 import { ensureProfile } from '@/modules/auth/service';
 import { requireConversation } from '@/modules/conversations/service';
 import { resolveChatModel, streamChat } from '@/modules/ai/service';
+import { repository } from '@/lib/spacetimedb/repository';
 
 export const runtime = 'nodejs';
 
@@ -12,7 +13,8 @@ export async function POST(request: Request) {
     const { token, claims } = await requireAuth(request);
     await ensureProfile(token, claims);
     const body = await parseJson(request, chatSchema);
-    const model = await resolveChatModel(token, body.model);
+    const settings = await repository.getSettings(token);
+    const model = await resolveChatModel(token, body.model, settings);
 
     let conversationId: string;
     if (body.conversationId) {
@@ -24,7 +26,7 @@ export async function POST(request: Request) {
       conversationId = conversation.id;
     }
 
-    const response = await streamChat({ token, conversationId, userMessage: body.message, model });
+    const response = await streamChat({ token, conversationId, userMessage: body.message, model, settings });
     response.headers.set('x-conversation-id', conversationId);
     return response;
   });

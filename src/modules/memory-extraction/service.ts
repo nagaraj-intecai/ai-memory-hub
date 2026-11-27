@@ -7,6 +7,7 @@ import { createUsageSnapshot, finalizeUsage, mergeUsage, type AiUsageSnapshot } 
 import { repository, type CreateMemoryInput } from '@/lib/spacetimedb/repository';
 
 import { MEMORY_CATEGORIES } from '@/lib/validation/schemas';
+import type { MemoryDto } from '@/types/domain';
 
 const candidateSchema = z.object({
   shouldSave: z.boolean(),
@@ -107,6 +108,7 @@ export async function maybeExtractMemory(
   userMessage: string,
   assistantMessage: string,
   enabled = true,
+  existingMemories?: MemoryDto[],
 ): Promise<{ memory?: CreateMemoryInput; usage: AiUsageSnapshot }> {
   const usage = createUsageSnapshot();
   const env = getEnv();
@@ -156,7 +158,7 @@ export async function maybeExtractMemory(
   }
 
   const key = dedupeKey(candidate.title, candidate.summary);
-  const existing = await repository.listMemories(token);
+  const existing = existingMemories ?? (await repository.listMemories(token));
   if (existing.some((memory) => memory.dedupeKey === key)) {
     return { usage: finalizeUsage(usage) };
   }

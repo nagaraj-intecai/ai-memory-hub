@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { badRequest, errorResponse } from '@/middleware/errors';
 import { logger } from '@/lib/logger';
+import { runWithRequestCache } from '@/lib/request-cache';
 
 export async function handleRoute(name: string, handler: () => Promise<Response>): Promise<Response> {
   const startedAt = Date.now();
   const requestId = handler.name || name;
   try {
-    const response = await handler();
+    const response = await runWithRequestCache(handler);
     logger.request(requestId, 'route', name, response.status, Date.now() - startedAt);
     return response;
   } catch (error) {

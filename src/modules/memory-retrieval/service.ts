@@ -10,10 +10,10 @@ function tokenize(value: string): string[] {
   return base;
 }
 
-export async function retrieveRelevantMemories(token: string, query: string, limit = 12): Promise<MemoryDto[]> {
-  const memories = (await repository.listMemories(token)).filter((memory) => memory.status === 'active');
+export function selectRelevantMemories(memories: MemoryDto[], query: string, limit = 12): MemoryDto[] {
   const queryTokens = new Set(tokenize(query));
   const scored = memories
+    .filter((memory) => memory.status === 'active')
     .map((memory) => {
       const contentTokens = tokenize(`${memory.title} ${memory.summary} ${memory.content}`);
       const score = contentTokens.reduce((total, current) => total + (queryTokens.has(current) ? 1 : 0), 0);
@@ -21,4 +21,8 @@ export async function retrieveRelevantMemories(token: string, query: string, lim
     })
     .sort((a, b) => b.score - a.score || b.memory.importance - a.memory.importance);
   return scored.slice(0, limit).map((entry) => entry.memory);
+}
+
+export async function retrieveRelevantMemories(token: string, query: string, limit = 12): Promise<MemoryDto[]> {
+  return selectRelevantMemories(await repository.listMemories(token), query, limit);
 }

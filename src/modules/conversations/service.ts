@@ -19,8 +19,11 @@ export async function createConversation(token: string, title: string, model: st
 }
 
 export async function getConversationMessages(token: string, conversationId: string): Promise<MessageDto[]> {
-  await requireConversation(token, conversationId);
-  return repository.getMessages(token, conversationId);
+  const [, messages] = await Promise.all([
+    requireConversation(token, conversationId),
+    repository.getMessages(token, conversationId),
+  ]);
+  return messages;
 }
 
 export async function deleteConversation(token: string, conversationId: string): Promise<void> {

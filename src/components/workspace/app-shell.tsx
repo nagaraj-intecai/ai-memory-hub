@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Brain, LayoutDashboard, LogOut, MessageSquare, RefreshCw, Settings } from 'lucide-react';
 import { apiClient, type ModelOption } from '@/lib/api-client';
 import { DbConnection } from '@/lib/spacetimedb/generated';
@@ -55,27 +55,40 @@ export function AppShell({ initialTab = 'dashboard' }: { initialTab?: Tab }) {
   const [activity, setActivity] = useState<ActivityDto[]>([]);
   const [models, setModels] = useState<ModelOption[]>([]);
   const [syncing, setSyncing] = useState(false);
+  const workspaceSyncRef = useRef<Promise<void> | undefined>(undefined);
 
-  const loadWorkspaceData = useCallback(async () => {
-    setSyncing(true);
-    try {
-      const [memRes, convRes, relRes, usageRes, activityRes, settingsRes] = await Promise.all([
-        apiClient.memories.list({ limit: 200 }),
-        apiClient.conversations.list(),
-        apiClient.relations.list(),
-        apiClient.ai.usage(),
-        apiClient.activity.list(),
-        apiClient.settings.get(),
-      ]);
-      setMemories(memRes.memories);
-      setConversations(convRes.conversations);
-      setRelations(relRes.relations);
-      setUsage(usageRes.usage);
-      setActivity(activityRes.activity);
-      if (settingsRes.settings) setSettings(settingsRes.settings);
-    } finally {
-      setSyncing(false);
-    }
+  const loadWorkspaceData = useCallback(() => {
+    if (workspaceSyncRef.current) return workspaceSyncRef.current;
+
+    const sync = (async () => {
+      setSyncing(true);
+      try {
+        const [memRes, convRes, relRes, usageRes, activityRes, settingsRes] = await Promise.all([
+          apiClient.memories.list({ limit: 200 }),
+          apiClient.conversations.list(),
+          apiClient.relations.list(),
+          apiClient.ai.usage(),
+          apiClient.activity.list(),
+          apiClient.settings.get(),
+        ]);
+        setMemories(memRes.memories);
+        setConversations(convRes.conversations);
+        setRelations(relRes.relations);
+        setUsage(usageRes.usage);
+        setActivity(activityRes.activity);
+        if (settingsRes.settings) setSettings(settingsRes.settings);
+      } finally {
+        setSyncing(false);
+      }
+    })();
+
+    workspaceSyncRef.current = sync;
+    void sync
+      .finally(() => {
+        if (workspaceSyncRef.current === sync) workspaceSyncRef.current = undefined;
+      })
+      .catch(() => undefined);
+    return sync;
   }, []);
 
   const loadModels = useCallback(async (refresh = false) => {
@@ -107,6 +120,7 @@ export function AppShell({ initialTab = 'dashboard' }: { initialTab?: Tab }) {
   useEffect(() => {
     if (!authenticated) return;
     let conn: DbConnection | undefined;
+    let realtimeConnected = false;
     if (authToken) {
       try {
         conn = DbConnection.builder()
@@ -114,6 +128,7 @@ export function AppShell({ initialTab = 'dashboard' }: { initialTab?: Tab }) {
           .withDatabaseName(process.env.NEXT_PUBLIC_SPACETIME_DB_NAME ?? 'ai-memory-hub-v2')
           .withToken(authToken)
           .onConnect((ctx) => {
+            realtimeConnected = true;
             ctx.subscriptionBuilder()
               .onApplied(() => {
                 void loadWorkspaceData();
@@ -125,6 +140,9 @@ export function AppShell({ initialTab = 'dashboard' }: { initialTab?: Tab }) {
                 'SELECT * FROM my_ai_usage',
                 'SELECT * FROM my_activity',
               ]);
+          })
+          .onDisconnect(() => {
+            realtimeConnected = false;
           })
           .build();
 
@@ -141,7 +159,7 @@ export function AppShell({ initialTab = 'dashboard' }: { initialTab?: Tab }) {
     }
 
     const timer = setInterval(() => {
-      void loadWorkspaceData();
+      if (!realtimeConnected) void loadWorkspaceData();
     }, 15_000);
     return () => {
       clearInterval(timer);

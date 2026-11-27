@@ -1,4 +1,5 @@
 import { getEnv } from '@/lib/env';
+import { cachedQuery, invalidateRequestQueries } from '@/lib/request-cache';
 
 export type SpacetimeErrorCode = 'validation' | 'conflict' | 'not_found' | 'forbidden' | 'unauthorized' | 'transport';
 
@@ -218,37 +219,40 @@ export async function callReducer(token: string, reducerName: string, args: unkn
   if (typeof payload === 'object' && payload !== null && 'Err' in payload) {
     throw reducerError(payload);
   }
+  invalidateRequestQueries();
   return payload;
 }
 
 export async function queryRows(token: string, sql: string): Promise<Record<string, unknown>[]> {
-  const response = await spacetimeFetch(
-    '/sql',
-    {
-      method: 'POST',
-      headers: { 'content-type': 'text/plain' },
-      body: sql,
-    },
-    token,
-  );
-  const payload = await readJson(response);
-  if (!response.ok) {
-    const status = response.status >= 500 ? 502 : response.status;
-    throw new SpacetimeError('Database query failed', status, statusCode(status), payload);
-  }
-  if (!Array.isArray(payload)) {
-    throw new SpacetimeError('Database query returned an unexpected response', 502, 'transport', payload);
-  }
-
-  const rows: Record<string, unknown>[] = [];
-  for (const result of payload as StatementResult[]) {
-    const rawRows = Array.isArray(result.rows) ? result.rows : [];
-    for (const row of rawRows) {
-      const decoded = decodeRow(result.schema, row);
-      if (decoded) rows.push(decoded);
+  return cachedQuery(`query:${token}:${sql}`, async () => {
+    const response = await spacetimeFetch(
+      '/sql',
+      {
+        method: 'POST',
+        headers: { 'content-type': 'text/plain' },
+        body: sql,
+      },
+      token,
+    );
+    const payload = await readJson(response);
+    if (!response.ok) {
+      const status = response.status >= 500 ? 502 : response.status;
+      throw new SpacetimeError('Database query failed', status, statusCode(status), payload);
     }
-  }
-  return rows;
+    if (!Array.isArray(payload)) {
+      throw new SpacetimeError('Database query returned an unexpected response', 502, 'transport', payload);
+    }
+
+    const rows: Record<string, unknown>[] = [];
+    for (const result of payload as StatementResult[]) {
+      const rawRows = Array.isArray(result.rows) ? result.rows : [];
+      for (const row of rawRows) {
+        const decoded = decodeRow(result.schema, row);
+        if (decoded) rows.push(decoded);
+      }
+    }
+    return rows;
+  });
 }
 
 export function bigintString(value: unknown): string | undefined {
